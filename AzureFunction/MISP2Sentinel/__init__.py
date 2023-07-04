@@ -1,21 +1,18 @@
 from pymisp import PyMISP
 from pymisp import ExpandedPyMISP
-import config
+import MISP2Sentinel.config as config
 from collections import defaultdict
-import datetime
-from RequestManager import RequestManager
-from RequestObject import RequestObject
-from constants import *
+from MISP2Sentinel.RequestManager import RequestManager
+from MISP2Sentinel.RequestObject import RequestObject
+from MISP2Sentinel.constants import *
 import sys
 from functools import reduce
-
-if config.misp_verifycert is False:
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+import os
+import datetime
+import logging
+import azure.functions as func
 import requests
 import json
-
 
 def _get_events():
     misp = ExpandedPyMISP(config.misp_domain, config.misp_key, config.misp_verifycert)
@@ -72,8 +69,10 @@ def _handle_tlp_level(parsed_event):
     if 'tlpLevel' not in parsed_event:
         parsed_event['tlpLevel'] = 'Red'
 
-
-def main():
+def push_to_sentinel(tenant, id, secret):
+    config.graph_auth[TENANT] = tenant
+    config.graph_auth[CLIENT_ID] = id
+    config.graph_auth[CLIENT_SECRET] = secret
     if '-r' in sys.argv:
         print("Retrieve indicators from Sentinel")
         RequestManager.read_tiindicators()
@@ -136,12 +135,23 @@ def main():
     del events
     total_indicators = sum([len(v['request_objects']) for v in parsed_events])
 
-    with RequestManager(total_indicators) as request_manager:
+    with RequestManager(total_indicators, tenant) as request_manager:
         for request_body in _graph_post_request_body_generator(parsed_events):
             if config.verbose_log:
                 print(f"request body: {request_body}")
             request_manager.handle_indicator(request_body)
 
+def pmain():
+    tenants = json.loads(os.getenv('tenants'))
+    for key, value in tenants.items():
+        push_to_sentinel(key, value['id'], value['secret'])
 
-if __name__ == '__main__':
-    main()
+def main(mytimer: func.TimerRequest) -> None:
+    utc_timestamp = datetime.datetime.utcnow().replace(
+        tzinfo=datetime.timezone.utc).isoformat()
+
+    if mytimer.past_due:
+        logging.info('The timer is past due!')
+
+    pmain()
+    logging.info('Python timer trigger function ran at %s', utc_timestamp)
